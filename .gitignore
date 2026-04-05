@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+vendor/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# OS
+Thumbs.db
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Temporary
+*.tmp
+*.cache
+
+# Game data (optional - can be included for initialization)
+# data/games.json
+
+# Logs
+*.log

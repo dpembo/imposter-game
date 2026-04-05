@@ -1,0 +1,59 @@
+# IMPOSTER Game - .htaccess Configuration
+# For Apache web servers
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteBase /imposter/
+    
+    # Allow direct access to existing files and directories
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+</IfModule>
+
+# Set proper MIME types
+<IfModule mod_mime.c>
+    AddType application/javascript js
+    AddType application/json json
+    AddType text/css css
+    AddType text/html html
+    AddEncoding gzip .gz
+</IfModule>
+
+# Enable CORS headers and disable caching for development
+<IfModule mod_headers.c>
+    Header set Access-Control-Allow-Origin "*"
+    Header set Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
+    Header set Access-Control-Allow-Headers "Content-Type"
+    Header set Content-Type "application/json"
+    
+    # Disable all caching for development/testing
+    Header set Cache-Control "no-cache, no-store, must-revalidate, max-age=0"
+    Header set Pragma "no-cache"
+    Header set Expires "0"
+</IfModule>
+
+# Cache settings - DISABLED for testing
+<IfModule mod_expires.c>
+    ExpiresActive Off
+    
+    # Don't cache anything during development
+    ExpiresByType text/html "access plus 0 seconds"
+    ExpiresByType application/javascript "access plus 0 seconds"
+    ExpiresByType text/css "access plus 0 seconds"
+    ExpiresByType application/json "access plus 0 seconds"
+    ExpiresByType image/jpeg "access plus 0 seconds"
+    ExpiresByType image/gif "access plus 0 seconds"
+    ExpiresByType image/png "access plus 0 seconds"
+</IfModule>
+
+# Compression
+<IfModule mod_deflate.c>
+    AddOutputFilterByType DEFLATE text/html text/plain text/css application/javascript text/javascript
+</IfModule>
+
+# Security headers
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set X-XSS-Protection "1; mode=block"
+</IfModule>

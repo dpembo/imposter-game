@@ -1,0 +1,91 @@
+<?php
+require_once __DIR__ . '/GameManager.php';
+
+header('Content-Type: application/json');
+
+if (!isset($_GET['code'])) {
+    echo json_encode(['success' => false, 'error' => 'No game code']);
+    exit;
+}
+
+$code = strtoupper($_GET['code']);
+$game = GameManager::getGame($code);
+
+if (!$game) {
+    echo json_encode(['success' => false, 'error' => 'Game not found']);
+    exit;
+}
+
+// Format players for response
+$players = [];
+foreach ($game['players'] as $playerId => $playerData) {
+    $players[] = [
+        'id' => $playerId,
+        'name' => $playerData['name'],
+        'isInitiator' => $playerData['isInitiator'],
+        'ready' => $playerData['ready'] ?? true
+    ];
+}
+
+// Format current player
+$currentPlayer = null;
+if ($game['state']['currentPlayer']) {
+    if (isset($game['players'][$game['state']['currentPlayer']])) {
+        $currentPlayer = [
+            'id' => $game['state']['currentPlayer'],
+            'name' => $game['players'][$game['state']['currentPlayer']]['name']
+        ];
+    }
+}
+
+// Format imposter player
+$imposterPlayer = null;
+if ($game['state']['imposterPlayer']) {
+    if (isset($game['players'][$game['state']['imposterPlayer']])) {
+        $imposterPlayer = [
+            'id' => $game['state']['imposterPlayer'],
+            'name' => $game['players'][$game['state']['imposterPlayer']]['name']
+        ];
+    }
+}
+
+// Format words said
+$wordsSaid = [];
+if (is_array($game['state']['wordsSaid'])) {
+    foreach ($game['state']['wordsSaid'] as $entry) {
+        $wordsSaid[$entry['playerId']] = $entry['word'];
+    }
+}
+
+// Format votes
+$votes = [];
+if (is_array($game['state']['votes'])) {
+    foreach ($game['state']['votes'] as $playerId => $votedFor) {
+        $votes[$playerId] = $votedFor;
+    }
+}
+
+echo json_encode([
+    'success' => true,
+    'state' => [
+        'gameStarted' => $game['state']['gameStarted'],
+        'gameActive' => $game['state']['gameActive'],
+        'phase' => $game['state']['phase'],
+        'currentRound' => $game['state']['currentRound'],
+        'currentTurn' => $game['state']['currentTurn'],
+        'totalTurns' => $game['state']['totalTurns'],
+        'word' => $game['state']['word'],
+        'category' => $game['state']['category'],
+        'imposterPlayer' => $imposterPlayer,
+        'currentPlayer' => $currentPlayer,
+        'wordsSaid' => $wordsSaid,
+        'votes' => $votes
+    ],
+    'players' => $players,
+    'maxPlayers' => $game['maxPlayers'],
+    'gameMode' => $game['gameMode'] ?? 'online',
+    'categories' => $game['categories'],
+    'numRounds' => $game['numRounds'],
+    'imposterHints' => $game['imposterHints'] ?? true
+]);
+?>

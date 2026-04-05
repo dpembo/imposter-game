@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>Imposter - Party Game</title>
+    <link rel="stylesheet" href="assets/css/style.css?v=" id="cssCache">
+</head>
+<body>
+    <div id="app"></div>
+
+    <!-- Audio elements for sound effects -->
+    <audio id="sfx-join" preload="auto"></audio>
+    <audio id="sfx-reveal" preload="auto"></audio>
+    <audio id="sfx-vote" preload="auto"></audio>
+    <audio id="sfx-caught" preload="auto"></audio>
+    <audio id="sfx-click" preload="auto"></audio>
+    <audio id="sfx-notification" preload="auto"></audio>
+
+    <script src="data/words.js?v=1" id="wordsCache"></script>
+    <script src="assets/js/audio.js?v=1" id="audioCache"></script>
+    <script src="assets/js/app.js?v=1" id="appCache"></script>
+    <script>
+        // Cache busting for development - adds timestamp to force fresh loads
+        document.addEventListener('DOMContentLoaded', () => {
+            const timestamp = Date.now();
+            const cacheElements = ['cssCache', 'wordsCache', 'audioCache', 'appCache'];
+            cacheElements.forEach(id => {
+                const el = document.getElementById(id);
+                if (el) {
+                    const href = el.href || el.src;
+                    if (href && !href.includes('timestamp=')) {
+                        const separator = href.includes('?') ? '&' : '?';
+                        el.href ? (el.href = href + separator + 'timestamp=' + timestamp) : (el.src = href + separator + 'timestamp=' + timestamp);
+                    }
+                }
+            });
+        });
+    </script>
+</body>
+</html>
