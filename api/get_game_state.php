@@ -16,6 +16,16 @@ if (!$game) {
     exit;
 }
 
+// Auto-transition from voting to results after 20 seconds
+if ($game['state']['phase'] === 'voting' && $game['state']['votingStartTime']) {
+    $elapsedSeconds = time() - $game['state']['votingStartTime'];
+    if ($elapsedSeconds >= 20) {
+        $game['state']['phase'] = 'results';
+        $game['state']['resultStartTime'] = time();
+        GameManager::updateGame($code, $game);
+    }
+}
+
 // Format players for response
 $players = [];
 foreach ($game['players'] as $playerId => $playerData) {
@@ -79,7 +89,9 @@ echo json_encode([
         'imposterPlayer' => $imposterPlayer,
         'currentPlayer' => $currentPlayer,
         'wordsSaid' => $wordsSaid,
-        'votes' => $votes
+        'votes' => $votes,
+        'votingStartTime' => $game['state']['votingStartTime'] ?? null,
+        'resultStartTime' => $game['state']['resultStartTime'] ?? null
     ],
     'players' => $players,
     'maxPlayers' => $game['maxPlayers'],

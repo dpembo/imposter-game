@@ -18,7 +18,6 @@ class ImposterGame {
         this.isInitiator = false;
         this.players = [];
         this.currentPlayer = null;
-        this.players = null;
         this.gameSettings = {
             numRounds: 1,
             categories: [],
@@ -44,6 +43,8 @@ class ImposterGame {
         };
         this.pollInterval = null;
         this.revealTimerId = null;
+        this.votingTimerId = null;
+        this.resultsTimerId = null;
         this.screenChangeCallback = null;
     }
 
@@ -150,20 +151,30 @@ class ImposterGame {
                     lastPlayersCount = currentPlayersCount;
 
                     // Determine current screen based on game state
+                    let newScreen = this.currentScreen;
                     if (data.state.gameActive) {
                         if (data.state.phase === 'voting') {
-                            this.currentScreen = 'voting';
-                        } else if (data.state.phase === 'reveal') {
-                            this.currentScreen = 'reveal';
+                            newScreen = 'voting';
                         } else if (data.state.phase === 'results') {
-                            this.currentScreen = 'results';
-                            audio.playSound('caught');
+                            newScreen = 'results';
+                            // Only play sound when transitioning INTO results
+                            if (oldScreen !== 'results') {
+                                console.log('Transitioning to results, playing sound');
+                                audio.playSound('caught');
+                            }
                         } else {
-                            this.currentScreen = 'game';
+                            newScreen = 'game';
                         }
                     } else if (data.state.gameStarted) {
-                        this.currentScreen = 'lobby';
+                        newScreen = 'lobby';
                     }
+                    
+                    // Log transitions
+                    if (oldScreen !== newScreen) {
+                        console.log(`Screen transition: ${oldScreen} -> ${newScreen}, phase: ${data.state.phase}`);
+                    }
+                    
+                    this.currentScreen = newScreen;
 
                     // Only re-render if something actually changed
                     if (oldScreen !== this.currentScreen || hasStateChanged || hasPlayersChanged) {
@@ -181,9 +192,17 @@ class ImposterGame {
             clearInterval(this.pollInterval);
             this.pollInterval = null;
         }
+        if (this.votingTimerId) {
+            clearInterval(this.votingTimerId);
+            this.votingTimerId = null;
+        }
         if (this.revealTimerId) {
             clearInterval(this.revealTimerId);
             this.revealTimerId = null;
+        }
+        if (this.resultsTimerId) {
+            clearInterval(this.resultsTimerId);
+            this.resultsTimerId = null;
         }
     }
 
@@ -241,6 +260,20 @@ class ImposterGame {
     async startNextRound() {
         if (!this.isInitiator) return;
 
+        // Clear any active timers
+        if (this.votingTimerId) {
+            clearInterval(this.votingTimerId);
+            this.votingTimerId = null;
+        }
+        if (this.revealTimerId) {
+            clearInterval(this.revealTimerId);
+            this.revealTimerId = null;
+        }
+        if (this.resultsTimerId) {
+            clearInterval(this.resultsTimerId);
+            this.resultsTimerId = null;
+        }
+
         try {
             const response = await fetch('api/start_round.php', {
                 method: 'POST',
@@ -254,6 +287,20 @@ class ImposterGame {
             const data = await response.json();
             if (data.success) {
                 audio.playSound('click');
+                
+                // Immediately fetch updated game state to get new imposter and round data
+                const stateResponse = await fetch(`api/get_game_state.php?code=${this.gameCode}&t=${Date.now()}`, {
+                    cache: 'no-store'
+                });
+                const stateData = await stateResponse.json();
+                
+                if (stateData.success) {
+                    this.gameState = stateData.state;
+                    this.players = stateData.players;
+                    this.currentScreen = 'game';
+                    this.render();
+                }
+                
                 return true;
             }
             return false;
@@ -282,9 +329,6 @@ class ImposterGame {
                 break;
             case 'voting':
                 app.appendChild(this.renderVoting());
-                break;
-            case 'reveal':
-                app.appendChild(this.renderReveal());
                 break;
             case 'results':
                 app.appendChild(this.renderResults());
@@ -337,18 +381,17 @@ class ImposterGame {
         const allCategories = Object.keys(typeof WORD_DATABASE !== 'undefined' ? WORD_DATABASE : {});
         let selected = this.gameSettings.categories || [];
         
-        // If none selected or 'ALL' is selected, show 'All Categories Selected'
-        if (!selected.length || selected[0] === 'ALL') {
+        // If none selected, treat as all categories
+        if (!selected.length) {
+            categoryHTML += '<span style="grid-column: 1 / -1; text-align: center; color: var(--success);">✓ All Categories Selected</span>';
+        } else if (selected.length === allCategories.length) {
+            // If all are selected, show message
             categoryHTML += '<span style="grid-column: 1 / -1; text-align: center; color: var(--success);">✓ All Categories Selected</span>';
         } else {
-            const isAll = selected.length === allCategories.length && allCategories.every(cat => selected.includes(cat));
-            if (isAll) {
-                categoryHTML += '<span style="grid-column: 1 / -1; text-align: center; color: var(--success);">✓ All Categories Selected</span>';
-            } else {
-                selected.filter(cat => cat !== 'ALL').forEach(cat => {
-                    categoryHTML += `<div class="category-btn selected">${cat.replace(/_/g, ' ')}</div>`;
-                });
-            }
+            // Show only selected categories
+            selected.forEach(cat => {
+                categoryHTML += `<div class="category-btn selected">${cat.replace(/_/g, ' ')}</div>`;
+            });
         }
         categoryHTML += '</div>';
 
@@ -403,6 +446,8 @@ class ImposterGame {
     renderGame() {
         const div = document.createElement('div');
         div.className = 'screen game-screen active';
+
+        console.log('renderGame called:', { currentTurn: this.gameState.currentTurn, totalTurns: this.gameState.totalTurns, currentPlayer: this.gameState.currentPlayer?.name });
 
         const isCurrentPlayer = this.gameState.currentPlayer?.id === this.playerId;
         const isImposter = this.gameState.imposterPlayer?.id === this.playerId;
@@ -521,108 +566,124 @@ class ImposterGame {
         return div;
     }
 
+    updateVotingTimer() {
+        const votingStartTime = this.gameState?.votingStartTime;
+        if (!votingStartTime || typeof votingStartTime !== 'number' || votingStartTime <= 0) return;
+        
+        const clientTimeSeconds = Math.floor(Date.now() / 1000);
+        const elapsedSeconds = clientTimeSeconds - votingStartTime;
+        const remainingSeconds = Math.max(0, 20 - elapsedSeconds);
+        
+        const timerDisplay = document.getElementById('voting-timer-display');
+        const votesDisplay = document.getElementById('voting-votes-display');
+        
+        if (timerDisplay) {
+            timerDisplay.textContent = Math.floor(remainingSeconds);
+        }
+        
+        // Auto-advance if time expires
+        if (remainingSeconds <= 0 && this.votingTimerId) {
+            clearInterval(this.votingTimerId);
+            this.votingTimerId = null;
+            // Could add auto-transition logic here
+        }
+    }
+
+    updateResultsTimer() {
+        const resultStartTime = this.gameState?.resultStartTime;
+        if (!resultStartTime || typeof resultStartTime !== 'number' || resultStartTime <= 0) return;
+        
+        const clientTimeSeconds = Math.floor(Date.now() / 1000);
+        const elapsedSeconds = clientTimeSeconds - resultStartTime;
+        const remainingSeconds = Math.max(0, 30 - elapsedSeconds);
+        
+        const timerDisplay = document.getElementById('results-timer-display');
+        
+        if (timerDisplay) {
+            timerDisplay.textContent = Math.floor(remainingSeconds);
+        }
+        
+        // Auto-advance if time expires
+        if (remainingSeconds <= 0 && this.resultsTimerId) {
+            clearInterval(this.resultsTimerId);
+            this.resultsTimerId = null;
+            // Could add auto-transition logic here
+        }
+    }
+
     renderVoting() {
         const div = document.createElement('div');
         div.className = 'screen voting-screen active';
+        div.style.cssText = 'width: 100%; height: 100%; display: flex !important; flex-direction: column; align-items: center; justify-content: center; position: relative; z-index: 10;';
 
-        div.innerHTML = `
-            <div class="voting-container">
-                <h2 class="voting-title">👮 Who is the Imposter?</h2>
-                <div class="voting-grid">
-                    ${this.players.map(p => `
-                        <div class="vote-card ${this.gameState.votes[this.playerId] === p.id ? 'voted' : ''}" 
-                             onclick="game.vote('${p.id}')">
-                            <div class="vote-name">${p.name}${p.isMe ? ' (You)' : ''}</div>
-                            <div class="vote-label">${this.gameState.imposterPlayer?.id === p.id && Object.values(this.gameState.votes).length === this.players.length ? 'IMPOSTER 🎯' : 'Cast Vote'}</div>
-                        </div>
-                    `).join('')}
-                </div>
-                <div style="text-align: center; color: var(--light); opacity: 0.7;">
-                    Votes: ${Object.keys(this.gameState.votes).length}/${this.players.length}
-                </div>
-            </div>
-        `;
-
-        return div;
-    }
-
-    renderReveal() {
-        const div = document.createElement('div');
-        div.className = 'screen reveal-screen active';
-
-        const imposterName = this.gameState.imposterPlayer?.name || 'Unknown';
-        const imposterVotes = Object.values(this.gameState.votes).filter(v => v === this.gameState.imposterPlayer?.id).length;
-        const revealStartTime = this.gameState.revealStartTime || Date.now() / 1000;
-        const elapsedSeconds = Math.floor(Date.now() / 1000) - revealStartTime;
-        const remainingSeconds = Math.max(0, 20 - elapsedSeconds);
-        const isFinalRound = this.gameState.currentRound >= this.gameSettings.numRounds;
-
-        // Set up auto-advance if not already set up
-        if (!this.revealTimerId && remainingSeconds > 0) {
-            this.revealTimerId = setInterval(() => {
-                if (this.currentScreen === 'reveal') {
-                    this.render();
-                    // Check if time has expired
-                    const currentElapsed = Math.floor(Date.now() / 1000) - revealStartTime;
-                    if (currentElapsed >= 20) {
-                        clearInterval(this.revealTimerId);
-                        this.revealTimerId = null;
-                        // Auto-advance to results
-                        if (this.isInitiator) {
-                            this.startNextRound();
-                        } else {
-                            // Poll will update when initiator advances
-                        }
+        try {
+            const votingStartTime = this.gameState?.votingStartTime;
+            const playersArray = this.players || [];
+            const votesObj = this.gameState?.votes || {};
+            const votesCount = Object.keys(votesObj).length;
+            
+            // Calculate countdown timer (20 seconds)
+            let remainingSeconds = 20;
+            if (votingStartTime && typeof votingStartTime === 'number' && votingStartTime > 0) {
+                const clientTimeSeconds = Math.floor(Date.now() / 1000);
+                const elapsedSeconds = clientTimeSeconds - votingStartTime;
+                remainingSeconds = Math.max(0, 20 - elapsedSeconds);
+            }
+            
+            console.log('renderVoting:', { votingStartTime, playersCount: playersArray.length, votesCount, remainingSeconds });
+            
+            // Set up voting timer - updates ONLY the countdown, not the entire screen
+            if (!this.votingTimerId && votingStartTime && typeof votingStartTime === 'number' && votingStartTime > 0) {
+                this.votingTimerId = setInterval(() => {
+                    if (this.currentScreen === 'voting') {
+                        this.updateVotingTimer();
                     }
-                }
-            }, 100);
-        } else if (remainingSeconds === 0 && this.revealTimerId) {
-            clearInterval(this.revealTimerId);
-            this.revealTimerId = null;
+                }, 100);
+            }
+
+            let html = '<div class="voting-container" style="background: rgba(131, 56, 236, 0.2) !important; border: 3px solid yellow !important; display: flex !important; flex-direction: column; align-items: center; gap: 1.5rem; width: 90%; max-width: 900px; padding: 3rem;"><h2 class="voting-title">👮 Who is the Imposter?</h2>';
+            
+            // Check if votingStartTime is valid
+            if (!votingStartTime || typeof votingStartTime !== 'number' || votingStartTime <= 0) {
+                html += '<div style="text-align: center; padding: 2rem; background: rgba(255, 255, 255, 0.1); border-radius: 10px; margin: 2rem; color: var(--secondary);">';
+                html += '<div style="font-size: 1.5rem; margin-bottom: 1rem;">⏳ Waiting for voting to start...</div>';
+                html += '<div style="font-size: 0.9rem; color: var(--light);">votingStartTime: ' + votingStartTime + ' (type: ' + typeof votingStartTime + ')</div>';
+                html += '</div>';
+            } else if (playersArray.length === 0) {
+                html += '<div style="text-align: center; padding: 2rem; color: var(--error);">No players loaded</div>';
+            } else {
+                // Render vote cards
+                html += '<div class="voting-grid" style="width: 100%; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1.5rem;">';
+                playersArray.forEach(p => {
+                    const isVoted = votesObj[this.playerId] === p.id;
+                    html += '<div class="vote-card ' + (isVoted ? 'voted' : '') + '" onclick="game.vote(\'' + p.id + '\')">';
+                    html += '<div class="vote-name">' + p.name + (p.isMe ? ' (You)' : '') + '</div>';
+                    html += '<div class="vote-label">Cast Vote</div>';
+                    html += '</div>';
+                });
+                html += '</div>';
+            }
+            
+            html += '<div style="text-align: center; margin-top: 2rem;" id="voting-timer-container">';
+            html += '<div style="font-size: 2.5rem; font-weight: bold; color: var(--secondary); margin-bottom: 0.5rem;" id="voting-timer-display">' + Math.floor(remainingSeconds) + '</div>';
+            html += '<div style="font-size: 1rem; color: var(--light); opacity: 0.8;">seconds to vote</div>';
+            html += '</div>';
+            
+            html += '<div style="text-align: center; color: var(--light); opacity: 0.7; margin-top: 1rem;" id="voting-votes-display">Votes: ' + votesCount + '/' + playersArray.length + '</div>';
+            html += '</div>';
+            
+            console.log('renderVoting HTML length:', html.length);
+            console.log('renderVoting HTML preview:', html.substring(0, 200));
+            console.log('renderVoting div class:', div.className);
+            
+            div.innerHTML = html;
+            
+            console.log('After innerHTML set, div.innerHTML length:', div.innerHTML.length);
+            console.log('div children count:', div.children.length);
+        } catch (error) {
+            console.error('Error in renderVoting:', error);
+            div.innerHTML = '<div class="voting-container" style="background: red; border: 5px solid yellow;"><div style="color: white; text-align: center; padding: 2rem; font-size: 2rem;">Error rendering voting screen: ' + error.message + '</div></div>';
         }
-
-        // Build voting details
-        let votingDetails = '<div style="margin: 1.5rem 0; padding: 1rem; background: rgba(58,134,255,0.1); border-radius: 10px;">';
-        votingDetails += '<div style="font-size: 0.9rem; color: var(--accent); font-weight: bold; margin-bottom: 0.8rem;">Voting Results:</div>';
-        this.players.forEach(p => {
-            const votedFor = Object.entries(this.gameState.votes).find(([voter, votee]) => voter === p.id);
-            const votedForName = votedFor ? this.players.find(pl => pl.id === votedFor[1])?.name || 'Unknown' : 'No Vote';
-            const isHighlighted = votedForName === imposterName ? 'style="color: var(--success); font-weight: bold;"' : '';
-            votingDetails += `<div style="margin: 0.3rem 0; font-size: 0.85rem;"><span style="opacity: 0.8;">${p.name}:</span> <span ${isHighlighted}>voted for ${votedForName}</span></div>`;
-        });
-        votingDetails += '</div>';
-
-        div.innerHTML = `
-            <div class="results-container">
-                <h2 class="results-title">👀 IMPOSTER REVEALED!</h2>
-
-                <div class="imposter-reveal" style="animation: imposterPulse 0.5s ease-in-out;">
-                    <div class="imposter-label">The Imposter Was:</div>
-                    <div class="imposter-name" style="font-size: 3.5rem; color: var(--primary); text-shadow: 0 0 20px var(--primary);">${imposterName}</div>
-                </div>
-
-                <div class="result-info">
-                    <div style="font-size: 1.1rem; margin-bottom: 0.5rem;">Votes for imposter: <strong>${imposterVotes}/${this.players.length}</strong></div>
-                </div>
-
-                ${votingDetails}
-
-                <div style="margin: 2rem 0; text-align: center;">
-                    <div style="font-size: 2.5rem; font-weight: bold; color: var(--secondary); margin-bottom: 0.5rem;">${remainingSeconds}</div>
-                    <div style="font-size: 1rem; color: var(--light); opacity: 0.8;">seconds until auto-advance</div>
-                </div>
-
-                <div class="results-actions">
-                    ${this.isInitiator && !isFinalRound ? `
-                        <button class="btn-primary" onclick="game.startNextRound()">Next Round</button>
-                    ` : isFinalRound && this.isInitiator ? `
-                        <button class="btn-primary" onclick="game.showGameSummary()">View Summary</button>
-                    ` : `
-                        <button class="btn-secondary" disabled>Waiting for Initiator...</button>
-                    `}
-                </div>
-            </div>
-        `;
 
         return div;
     }
@@ -630,99 +691,138 @@ class ImposterGame {
     renderResults() {
         const div = document.createElement('div');
         div.className = 'screen results-screen active';
+        div.style.cssText = 'width: 100%; height: 100%; display: flex !important; flex-direction: column; align-items: center; justify-content: flex-start; overflow-y: auto; position: relative; z-index: 10; padding-top: 2rem;';
 
-        const imposterName = this.gameState.imposterPlayer?.name || 'Unknown';
-        const roundStats = this.stats.rounds[this.gameState.currentRound - 1] || {};
-        const imposterVotes = Object.values(this.gameState.votes).filter(v => v === this.gameState.imposterPlayer?.id).length;
-        const isFinalRound = this.gameState.currentRound >= this.gameSettings.numRounds;
+        try {
+            const resultStartTime = this.gameState?.resultStartTime;
+            const playersArray = this.players || [];
+            const votesObj = this.gameState?.votes || {};
+            const imposterId = this.gameState?.imposterPlayer?.id;
+            const imposterName = this.gameState?.imposterPlayer?.name || 'Unknown';
+            const isFinalRound = this.gameState.currentRound >= this.gameSettings.numRounds;
+            
+            console.log('renderResults:', { resultStartTime, playersCount: playersArray.length, imposter: imposterName, isFinalRound });
+            
+            // Clear voting timer
+            if (this.votingTimerId) {
+                clearInterval(this.votingTimerId);
+                this.votingTimerId = null;
+            }
+            
+            // Calculate countdown timer (30 seconds for results)
+            let remainingSeconds = 30;
+            if (resultStartTime && typeof resultStartTime === 'number' && resultStartTime > 0) {
+                const clientTimeSeconds = Math.floor(Date.now() / 1000);
+                const elapsedSeconds = clientTimeSeconds - resultStartTime;
+                remainingSeconds = Math.max(0, 30 - elapsedSeconds);
+            }
+            
+            // Set up results timer - updates ONLY the countdown, not the entire screen
+            if (!this.resultsTimerId && resultStartTime && typeof resultStartTime === 'number' && resultStartTime > 0 && remainingSeconds > 0) {
+                this.resultsTimerId = setInterval(() => {
+                    if (this.currentScreen === 'results') {
+                        this.updateResultsTimer();
+                    }
+                }, 100);
+            }
 
-        let resultText = '';
-        let resultPoints = {};
-
-        // Calculate points
-        if (imposterVotes >= Math.ceil(this.players.length * 0.5)) {
-            resultText = `✓ The Imposter was caught! Everyone else earns 10 points.`;
-            this.players.forEach(p => {
-                if (p.id !== this.gameState.imposterPlayer?.id) {
-                    resultPoints[p.name] = 10;
-                    if (!this.stats.playerTotals[p.name]) this.stats.playerTotals[p.name] = 0;
-                    this.stats.playerTotals[p.name] += 10;
+            let html = '<div class="results-container" style="background: rgba(131, 56, 236, 0.2) !important; border: 3px solid lime !important; display: flex !important; flex-direction: column; width: 90%; max-width: 900px; padding: 3rem;\">';
+            
+            // Check if we have valid result data
+            if (!resultStartTime || typeof resultStartTime !== 'number' || resultStartTime <= 0) {
+                html += '<h2 class="results-title">🎭 Round Results</h2>';
+                html += '<div style="text-align: center; padding: 2rem; background: rgba(255, 255, 255, 0.1); border-radius: 10px; margin: 2rem; color: var(--secondary);">';
+                html += '<div style="font-size: 1.5rem; margin-bottom: 1rem;">⏳ Calculating Results...</div>';
+                html += '<div style="font-size: 0.9rem; color: var(--light);">resultStartTime: ' + resultStartTime + ' (type: ' + typeof resultStartTime + ')</div>';
+                html += '</div>';
+            } else if (playersArray.length === 0) {
+                html += '<h2 class="results-title">🎭 Round Results</h2>';
+                html += '<div style="text-align: center; padding: 2rem; color: var(--error);">No players loaded</div>';
+            } else {
+                // Render full results
+                html += '<h2 class="results-title">' + (isFinalRound ? '🎉 Game Complete!' : 'Round ' + (this.gameState.currentRound + 1) + ' Complete!') + '</h2>';
+                
+                // Imposter reveal
+                html += '<div class="imposter-reveal">';
+                html += '<div class="imposter-label">The Imposter Was:</div>';
+                html += '<div class="imposter-name">' + imposterName + '</div>';
+                html += '</div>';
+                
+                // Result info
+                const imposterVotes = Object.values(votesObj).filter(v => v === imposterId).length;
+                const resultText = imposterVotes >= Math.ceil(playersArray.length * 0.5) 
+                    ? '✓ The Imposter was caught! Everyone else earns 10 points.'
+                    : '✗ The Imposter escaped! The Imposter earns 20 points.';
+                
+                html += '<div class="result-info">';
+                html += '<div class="result-description">' + resultText + '</div>';
+                html += '<div style="font-size: 0.9rem; opacity: 0.8;">Votes for imposter: ' + imposterVotes + '/' + playersArray.length + '</div>';
+                html += '</div>';
+                
+                // Voting details
+                html += '<div style="margin: 1.5rem 0; padding: 1rem; background: rgba(58,134,255,0.1); border-radius: 10px;">';
+                html += '<div style="font-size: 0.9rem; color: var(--accent); font-weight: bold; margin-bottom: 0.8rem;">Voting Results:</div>';
+                playersArray.forEach(p => {
+                    const votedForId = votesObj[p.id];
+                    const votedForPlayer = playersArray.find(pl => pl.id === votedForId);
+                    const votedForName = votedForPlayer ? votedForPlayer.name : 'No Vote';
+                    const highlight = votedForName === imposterName ? ' style="color: var(--success); font-weight: bold;"' : '';
+                    html += '<div style="margin: 0.3rem 0; font-size: 0.85rem;"><span style="opacity: 0.8;">' + p.name + ':</span> <span' + highlight + '>voted for ' + votedForName + '</span></div>';
+                });
+                html += '</div>';
+                
+                // Leaderboard
+                const leaderboard = Object.entries(this.stats.playerTotals || {})
+                    .sort(([,a], [,b]) => b - a)
+                    .slice(0, 10);
+                
+                html += '<div class="leaderboard">';
+                html += '<h3 class="leaderboard-title">🏆 ' + (isFinalRound ? 'Final' : 'Current') + ' Leaderboard</h3>';
+                html += '<div class="leaderboard-items">';
+                leaderboard.forEach((entry, idx) => {
+                    const name = entry[0];
+                    const score = entry[1];
+                    const rankClass = idx === 0 ? 'first' : idx === 1 ? 'second' : idx === 2 ? 'third' : '';
+                    html += '<div class="leaderboard-item ' + rankClass + '">';
+                    html += '<div class="leaderboard-rank ' + rankClass + '">' + (idx + 1) + '</div>';
+                    html += '<div class="leaderboard-name">' + name + '</div>';
+                    html += '<div class="leaderboard-score">' + score + '</div>';
+                    html += '</div>';
+                });
+                html += '</div></div>';
+                
+                // Timer
+                html += '<div style="margin: 2rem 0; text-align: center;" id="results-timer-container">';
+                html += '<div style="font-size: 2.5rem; font-weight: bold; color: var(--secondary); margin-bottom: 0.5rem;" id="results-timer-display">' + Math.floor(remainingSeconds) + '</div>';
+                html += '<div style="font-size: 1rem; color: var(--light); opacity: 0.8;">seconds until next round</div>';
+                html += '</div>';
+                
+                // Action buttons
+                html += '<div class="results-actions">';
+                if (this.isInitiator && !isFinalRound) {
+                    html += '<button class="btn-primary" onclick="game.startNextRound()">Next Round</button>';
+                } else if (isFinalRound) {
+                    html += '<button class="btn-primary" onclick="game.showGameSummary()">View Summary</button>';
+                } else {
+                    html += '<button class="btn-secondary" disabled>Waiting for Initiator...</button>';
                 }
-            });
-        } else {
-            resultText = `✗ The Imposter escaped! The Imposter earns 20 points.`;
-            resultPoints[imposterName] = 20;
-            if (!this.stats.playerTotals[imposterName]) this.stats.playerTotals[imposterName] = 0;
-            this.stats.playerTotals[imposterName] += 20;
+                html += '</div>';
+            }
+            
+            html += '</div>';
+            
+            console.log('renderResults HTML length:', html.length);
+            console.log('renderResults HTML preview:', html.substring(0, 300));
+            console.log('renderResults div class:', div.className);
+            
+            div.innerHTML = html;
+            
+            console.log('After innerHTML set, div.innerHTML length:', div.innerHTML.length);
+            console.log('div children count:', div.children.length);
+        } catch (error) {
+            console.error('Error in renderResults:', error);
+            div.innerHTML = '<div class="results-container" style="background: red; border: 5px solid yellow;"><h2 class="results-title" style="color: white;">Error</h2><div style="color: white; text-align: center; padding: 2rem; font-size: 2rem;">Error rendering results screen: ' + error.message + '</div></div>';
         }
-
-        // Build voting details
-        let votingDetails = '<div style="margin: 1.5rem 0; padding: 1rem; background: rgba(58,134,255,0.1); border-radius: 10px;">';
-        votingDetails += '<div style="font-size: 0.9rem; color: var(--accent); font-weight: bold; margin-bottom: 0.8rem;">Voting Results:</div>';
-        this.players.forEach(p => {
-            const votedFor = Object.entries(this.gameState.votes).find(([voter, votee]) => voter === p.id);
-            const votedForName = votedFor ? this.players.find(pl => pl.id === votedFor[1])?.name || 'Unknown' : 'No Vote';
-            const isHighlighted = votedForName === imposterName ? 'style="color: var(--success); font-weight: bold;"' : '';
-            votingDetails += `<div style="margin: 0.3rem 0; font-size: 0.85rem;"><span style="opacity: 0.8;">${p.name}:</span> <span ${isHighlighted}>voted for ${votedForName}</span></div>`;
-        });
-        votingDetails += '</div>';
-
-        // Sort leaderboard
-        const leaderboard = Object.entries(this.stats.playerTotals)
-            .sort(([,a], [,b]) => b - a)
-            .slice(0, 10);
-
-        div.innerHTML = `
-            <div class="results-container">
-                <h2 class="results-title">${isFinalRound ? '🎉 Game Complete!' : `Round ${this.gameState.currentRound + 1} Complete!`}</h2>
-
-                <div class="imposter-reveal">
-                    <div class="imposter-label">The Imposter Was:</div>
-                    <div class="imposter-name">${imposterName}</div>
-                </div>
-
-                <div class="result-info">
-                    <div class="result-description">${resultText}</div>
-                    <div style="font-size: 0.9rem; opacity: 0.8;">Votes for imposter: ${imposterVotes}/${this.players.length}</div>
-                </div>
-
-                ${votingDetails}
-
-                ${Object.keys(resultPoints).length > 0 ? `
-                    <div class="result-points">
-                        ${Object.entries(resultPoints).map(([name, points]) => `
-                            <div class="points-card">
-                                <div class="points-player">${name}</div>
-                                <div class="points-value">+${points}</div>
-                            </div>
-                        `).join('')}
-                    </div>
-                ` : ''}
-
-                <div class="leaderboard">
-                    <h3 class="leaderboard-title">🏆 ${isFinalRound ? 'Final' : 'Current'} Leaderboard</h3>
-                    <div class="leaderboard-items">
-                        ${leaderboard.map(([name, score], idx) => `
-                            <div class="leaderboard-item ${idx === 0 ? 'first' : idx === 1 ? 'second' : idx === 2 ? 'third' : ''}">
-                                <div class="leaderboard-rank ${idx === 0 ? 'first' : idx === 1 ? 'second' : idx === 2 ? 'third' : ''}">${idx + 1}</div>
-                                <div class="leaderboard-name">${name}</div>
-                                <div class="leaderboard-score">${score}</div>
-                            </div>
-                        `).join('')}
-                    </div>
-                </div>
-
-                <div class="results-actions">
-                    ${this.isInitiator && !isFinalRound ? `
-                        <button class="btn-primary" onclick="game.startNextRound()">Next Round</button>
-                    ` : isFinalRound ? `
-                        <button class="btn-primary" onclick="game.showGameSummary()">View Summary</button>
-                    ` : `
-                        <button class="btn-secondary" disabled>Waiting for Initiator...</button>
-                    `}
-                </div>
-            </div>
-        `;
 
         return div;
     }

@@ -207,6 +207,7 @@ class GameManager {
             if ($game['state']['currentTurn'] >= $game['state']['totalTurns']) {
                 // Move to voting phase
                 $game['state']['phase'] = 'voting';
+                $game['state']['votingStartTime'] = time();
                 $game['state']['votes'] = [];
             }
         }
@@ -227,9 +228,9 @@ class GameManager {
         
         // Check if all players have voted
         if (count($game['state']['votes']) === count($game['players'])) {
-            $game['state']['phase'] = 'reveal';
-            $game['state']['gameActive'] = false;
-            $game['state']['revealStartTime'] = time();
+            // Transition directly to results phase
+            $game['state']['phase'] = 'results';
+            $game['state']['resultStartTime'] = time();
         }
         
         self::updateGame($code, $game);
@@ -246,7 +247,8 @@ class GameManager {
         $game['state']['gameActive'] = true;
         $game['state']['wordsSaid'] = [];
         $game['state']['votes'] = [];
-        $game['state']['revealStartTime'] = null;
+        $game['state']['votingStartTime'] = null;
+        $game['state']['resultStartTime'] = null;
         
         // Select new word and imposter
         $selectedCategory = self::selectRandomWord($game['categories'], $selectedWord);
