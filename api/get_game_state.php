@@ -56,7 +56,13 @@ if ($game['state']['imposterPlayer']) {
             'id' => $game['state']['imposterPlayer'],
             'name' => $game['players'][$game['state']['imposterPlayer']]['name']
         ];
+    } else {
+        // Debug: imposter ID doesn't exist in players
+        error_log("DEBUG: Imposter ID {$game['state']['imposterPlayer']} not found in players. Available IDs: " . json_encode(array_keys($game['players'])));
     }
+} else {
+    // Debug: imposter player not set
+    error_log("DEBUG: imposterPlayer is null/empty. Phase: {$game['state']['phase']}, Round: {$game['state']['currentRound']}");
 }
 
 // Format words said
@@ -98,6 +104,7 @@ echo json_encode([
     'gameMode' => $game['gameMode'] ?? 'online',
     'categories' => $game['categories'],
     'numRounds' => $game['numRounds'],
-    'imposterHints' => $game['imposterHints'] ?? true
+    'imposterHints' => $game['imposterHints'] ?? true,
+    'playerStats' => $game['state']['playerStats'] ?? []
 ]);
 ?>

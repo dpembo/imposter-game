@@ -39,7 +39,8 @@ class ImposterGame {
         this.stats = {
             rounds: [],
             playerTotals: {},
-            playerStats: {}  // Track per-player stats: imposterCount, thinkTimes[], etc.
+            playerStats: {},  // Track per-player stats: imposterCount, thinkTimes[], etc.
+            lastAccumulatedStats: {}  // Track what we've already added to totals to prevent double-accumulation
         };
         this.pollInterval = null;
         this.revealTimerId = null;
@@ -125,6 +126,9 @@ class ImposterGame {
 
         let lastState = JSON.stringify(this.gameState);
         let lastPlayersCount = this.players ? this.players.length : 0;
+        
+        // Reset score tracking to prevent double-accumulation
+        this.stats.lastAccumulatedStats = {};
 
         this.pollInterval = setInterval(async () => {
             try {
@@ -141,8 +145,41 @@ class ImposterGame {
                     const hasStateChanged = lastState !== currentState;
                     const hasPlayersChanged = lastPlayersCount !== currentPlayersCount;
 
+                    // Play sound when player joins or leaves lobby
+                    if (hasPlayersChanged && this.currentScreen === 'lobby') {
+                        if (currentPlayersCount > lastPlayersCount) {
+                            // Player joined
+                            audio.playSound('join');
+                        } else if (currentPlayersCount < lastPlayersCount) {
+                            // Player left
+                            audio.playSound('notification');
+                        }
+                    }
+
                     // Update game state
                     this.gameState = data.state;
+                    
+                    // Accumulate player stats into totals for leaderboard (only add the difference)
+                    if (data.playerStats) {
+                        for (const playerName in data.playerStats) {
+                            const currentScore = parseInt(data.playerStats[playerName]) || 0;
+                            const lastScore = parseInt(this.stats.lastAccumulatedStats[playerName]) || 0;
+                            const scoreIncrease = currentScore - lastScore;
+                            
+                            if (scoreIncrease > 0) {
+                                this.stats.playerTotals[playerName] = (parseInt(this.stats.playerTotals[playerName]) || 0) + scoreIncrease;
+                                this.stats.lastAccumulatedStats[playerName] = currentScore;
+                            }
+                        }
+                    }
+                    
+                    // Play sound if it's this player's turn
+                    const oldPlayer = this.currentPlayer;
+                    this.currentPlayer = data.state.currentPlayer?.id;
+                    if (oldPlayer !== this.currentPlayer && this.currentPlayer === this.playerId && this.currentScreen === 'game') {
+                        audio.playSound('notification');
+                    }
+                    
                     this.players = data.players;
                     this.gameSettings.numRounds = data.numRounds || this.gameSettings.numRounds;
                     this.gameSettings.gameMode = data.gameMode || this.gameSettings.gameMode;
@@ -381,15 +418,18 @@ class ImposterGame {
         const allCategories = Object.keys(typeof WORD_DATABASE !== 'undefined' ? WORD_DATABASE : {});
         let selected = this.gameSettings.categories || [];
         
+        // Filter out 'ALL' from selected list for checking
+        let realCategories = selected.filter(cat => cat !== 'ALL');
+        
         // If none selected, treat as all categories
-        if (!selected.length) {
+        if (!selected.length || (selected.length === 1 && selected[0] === 'ALL')) {
             categoryHTML += '<span style="grid-column: 1 / -1; text-align: center; color: var(--success);">✓ All Categories Selected</span>';
-        } else if (selected.length === allCategories.length) {
+        } else if (realCategories.length === allCategories.length) {
             // If all are selected, show message
             categoryHTML += '<span style="grid-column: 1 / -1; text-align: center; color: var(--success);">✓ All Categories Selected</span>';
         } else {
-            // Show only selected categories
-            selected.forEach(cat => {
+            // Show only selected categories (not 'ALL')
+            realCategories.forEach(cat => {
                 categoryHTML += `<div class="category-btn selected">${cat.replace(/_/g, ' ')}</div>`;
             });
         }
@@ -603,11 +643,15 @@ class ImposterGame {
             timerDisplay.textContent = Math.floor(remainingSeconds);
         }
         
-        // Auto-advance if time expires
+        // Auto-advance to next round if time expires and not final round
         if (remainingSeconds <= 0 && this.resultsTimerId) {
             clearInterval(this.resultsTimerId);
             this.resultsTimerId = null;
-            // Could add auto-transition logic here
+            
+            const isFinalRound = this.gameState.currentRound >= this.gameSettings.numRounds - 1;
+            if (!isFinalRound && this.isInitiator) {
+                this.startNextRound();
+            }
         }
     }
 
@@ -652,13 +696,16 @@ class ImposterGame {
             } else if (playersArray.length === 0) {
                 html += '<div style="text-align: center; padding: 2rem; color: var(--error);">No players loaded</div>';
             } else {
-                // Render vote cards
+                // Render vote cards - disable self-voting
                 html += '<div class="voting-grid" style="width: 100%; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1.5rem;">';
                 playersArray.forEach(p => {
                     const isVoted = votesObj[this.playerId] === p.id;
-                    html += '<div class="vote-card ' + (isVoted ? 'voted' : '') + '" onclick="game.vote(\'' + p.id + '\')">';
+                    const isSelf = p.id === this.playerId;
+                    const cardStyle = isSelf ? 'opacity: 0.5; cursor: not-allowed;' : 'cursor: pointer;';
+                    const onclickAttr = isSelf ? '' : 'onclick="game.vote(\'' + p.id + '\')"';
+                    html += '<div class="vote-card ' + (isVoted ? 'voted' : '') + '" style="' + cardStyle + '" ' + onclickAttr + '>';
                     html += '<div class="vote-name">' + p.name + (p.isMe ? ' (You)' : '') + '</div>';
-                    html += '<div class="vote-label">Cast Vote</div>';
+                    html += '<div class="vote-label">' + (isSelf ? 'Cannot vote for self' : 'Cast Vote') + '</div>';
                     html += '</div>';
                 });
                 html += '</div>';
@@ -699,7 +746,7 @@ class ImposterGame {
             const votesObj = this.gameState?.votes || {};
             const imposterId = this.gameState?.imposterPlayer?.id;
             const imposterName = this.gameState?.imposterPlayer?.name || 'Unknown';
-            const isFinalRound = this.gameState.currentRound >= this.gameSettings.numRounds;
+            const isFinalRound = this.gameState.currentRound >= this.gameSettings.numRounds - 1;
             
             console.log('renderResults:', { resultStartTime, playersCount: playersArray.length, imposter: imposterName, isFinalRound });
             
@@ -791,20 +838,28 @@ class ImposterGame {
                 });
                 html += '</div></div>';
                 
-                // Timer
-                html += '<div style="margin: 2rem 0; text-align: center;" id="results-timer-container">';
-                html += '<div style="font-size: 2.5rem; font-weight: bold; color: var(--secondary); margin-bottom: 0.5rem;" id="results-timer-display">' + Math.floor(remainingSeconds) + '</div>';
-                html += '<div style="font-size: 1rem; color: var(--light); opacity: 0.8;">seconds until next round</div>';
-                html += '</div>';
+                // Timer - only show if not final round
+                if (!isFinalRound) {
+                    html += '<div style="margin: 2rem 0; text-align: center;" id="results-timer-container">';
+                    html += '<div style="font-size: 2.5rem; font-weight: bold; color: var(--secondary); margin-bottom: 0.5rem;" id="results-timer-display">' + Math.floor(remainingSeconds) + '</div>';
+                    html += '<div style="font-size: 1rem; color: var(--light); opacity: 0.8;">seconds until next round</div>';
+                    html += '</div>';
+                }
                 
                 // Action buttons
                 html += '<div class="results-actions">';
-                if (this.isInitiator && !isFinalRound) {
-                    html += '<button class="btn-primary" onclick="game.startNextRound()">Next Round</button>';
-                } else if (isFinalRound) {
-                    html += '<button class="btn-primary" onclick="game.showGameSummary()">View Summary</button>';
+                if (!isFinalRound) {
+                    if (this.isInitiator) {
+                        html += '<button class="btn-primary" onclick="game.startNextRound()">Next Round</button>';
+                    } else {
+                        html += '<button class="btn-secondary" disabled>Waiting for Initiator...</button>';
+                    }
                 } else {
-                    html += '<button class="btn-secondary" disabled>Waiting for Initiator...</button>';
+                    // Final round - show Play Again and Close Lobby
+                    if (this.isInitiator) {
+                        html += '<button class="btn-primary" onclick="game.resetAndRestartGame()">Play Again</button>';
+                    }
+                    html += '<button class="btn-danger" onclick="game.closeLobby()">Close Lobby</button>';
                 }
                 html += '</div>';
             }
@@ -828,8 +883,11 @@ class ImposterGame {
     }
 
     showGameSummary() {
+        // Prevent multiple summary windows from being created
+        if (document.querySelector('.summary-screen')) return;
+        
         const div = document.createElement('div');
-        div.className = 'screen results-screen active';
+        div.className = 'screen results-screen active summary-screen';
 
         // Calculate final stats for each player
         const playerStats = {};
@@ -1079,9 +1137,15 @@ class ImposterGame {
     toggleCategoryCheckbox(checkbox) {
         const cat = checkbox.value;
         if (checkbox.checked) {
+            // When selecting a specific category, remove 'ALL'
+            this.gameSettings.categories = this.gameSettings.categories.filter(c => c !== 'ALL');
             if (!this.gameSettings.categories.includes(cat)) this.gameSettings.categories.push(cat);
         } else {
             this.gameSettings.categories = this.gameSettings.categories.filter(c => c !== cat);
+            // If no categories remain, default to ALL
+            if (this.gameSettings.categories.length === 0) {
+                this.gameSettings.categories = ['ALL'];
+            }
         }
     }
 
@@ -1219,18 +1283,22 @@ class ImposterGame {
         if (!this.isInitiator) return;
 
         try {
+            const categoriesToSend = this.gameSettings.categories || ['ALL'];
+            console.log('startGameSession - sending categories:', categoriesToSend);
+            
             const response = await fetch('api/start_game.php', {
                 method: 'POST',
                 cache: 'no-store',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     code: this.gameCode,
-                    categories: this.gameSettings.categories
+                    categories: categoriesToSend
                 })
             });
 
             const data = await response.json();
             if (data.success) {
+                console.log('Game session started with categories:', categoriesToSend);
                 audio.playSound('reveal');
             }
         } catch (error) {
@@ -1276,6 +1344,11 @@ class ImposterGame {
 
     async endGame() {
         this.stopPolling();
+        this.gameCode = null;
+        this.playerName = null;
+        this.isInitiator = false;
+        this.players = [];
+        this.currentPlayer = null;
         this.gameState = {
             currentRound: 0,
             currentTurn: 0,
@@ -1287,7 +1360,7 @@ class ImposterGame {
             votes: {},
             gameActive: false
         };
-        this.stats = { rounds: [], playerTotals: {} };
+        this.stats = { rounds: [], playerTotals: {}, lastAccumulatedStats: {} };
         this.currentScreen = 'menu';
         this.render();
     }
@@ -1297,6 +1370,7 @@ class ImposterGame {
     }
 
     leaveGame() {
+        audio.playSound('notification');  // Play sound when current player leaves
         this.stopPolling();
         this.currentScreen = 'menu';
         this.gameCode = null;
